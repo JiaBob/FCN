@@ -1,0 +1,20 @@
+The dataset contains the following:
+- RGB image data
+- groundtruth labels for 11 classes
+- depth data saved as disparity values in 16-bit png format
+- class_colors.txt file contains mapping between groundtruth
+  colors and class names using the following format:
+  class1
+  R G B
+  class2
+  R G B
+  ...
+
+- raw images are taken from the KITTI odometry dataset,
+  you can retrieve the original image position from the
+  filename which has the format "seqnum_imgnum.png"
+- for example image 09_001100.png is the image named
+  001100.png from KITTI sequence number 09
+- link to the corresponding KITTI images:
+  http://www.cvlibs.net/datasets/kitti/eval_odometry.php
+
