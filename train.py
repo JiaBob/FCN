@@ -16,7 +16,7 @@ writer = SummaryWriter('log')
 
 n_class = 12
 
-batch_size = 4
+batch_size = 1
 epochs = 500
 lr = 1e-4
 momentum = 0
@@ -68,12 +68,12 @@ pixel_scores = np.zeros(epochs)
 
 
 def train():
+    ti = time.time()
     for epoch in range(epochs):
         scheduler.step()
 
         ts = time.time()
-        for iter, (inputs, labels) in enumerate(train_loader):
-            ti = time.time()
+        for iter, (inputs, labels, _) in enumerate(train_loader):
             optimizer.zero_grad()
             inputs, labels = inputs.to(device), labels.to(device)
             outputs = fcn_model(inputs)
@@ -82,9 +82,9 @@ def train():
             optimizer.step()
 
             if iter % 10 == 0:
-                print("epoch{}, iter{}, time {} sec, loss: {}".format(epoch, iter, time.time()-ti, loss.item()))
+                print("epoch{}, iter{}, time elapsed{} sec, loss: {}".format(epoch, iter, time.time()-ti, loss.item()))
 
-        print("Finish epoch {}, time elapsed {}".format(epoch, time.time() - ts))
+        print("Finish epoch {}, epoch time{}".format(epoch, time.time() - ts))
         torch.save(fcn_model, model_path)
 
         val(epoch)
@@ -96,9 +96,9 @@ def val(epoch):
     pixel_accs = []
     tol_time = 0
     with torch.no_grad():
-        for iter, (inputs, labels) in enumerate(val_loader):
+        for iter, (inputs, labels, num_labels) in enumerate(val_loader):
             ti = time.time()
-            inputs, labels = inputs.to(device), labels.to(device)
+            inputs = inputs.to(device)
             output = fcn_model(inputs)
             output = output.data.cpu().numpy()
 
@@ -107,7 +107,7 @@ def val(epoch):
 
             writer.add_image('result %d'%(iter), inputs)
 
-            target = labels.cpu().numpy().reshape(N, h, w)
+            target = num_labels.numpy()
             for p, t in zip(pred, target):
                 total_ious.append(iou(p, t))
                 pixel_accs.append(pixel_acc(p, t))
@@ -115,6 +115,7 @@ def val(epoch):
             ti = time.time() - ti
             tol_time += ti
             writer.add_scalar('time', ti, iter)
+            print(iou(p, t), pixel_acc(p, t))
             print('Iteration {} takes {:.2f} sec'.format(iter, ti))
     print('total valuation time is {:.2f}'.format(tol_time))
     # Calculate average IoU
@@ -152,5 +153,5 @@ def pixel_acc(pred, target):
 
 
 if __name__ == "__main__":
-    #val(0)  # show the accuracy before training
-    train()
+    val(0)  # show the accuracy before training
+    #train()

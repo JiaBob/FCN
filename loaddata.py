@@ -1,5 +1,10 @@
 from torch.utils.data import Dataset
 import numpy as np
+import torch
+from skimage import io, transform
+import os
+
+from PIL import Image
 from skimage import io, transform
 import os
 
@@ -12,6 +17,7 @@ class kittidata(Dataset):
         self.class_color = ((128, 128, 128), (128, 0, 0), (128, 64, 128), (0, 0, 192), (64, 64, 128),
                             (128, 128, 0), (192, 192, 128), (64, 0, 128), (192, 128, 128), (64, 64, 0),
                             (0, 128, 192), (0, 0, 0))
+        self.class_n = 12
 
         self.data_path = data_path
         self.label_path = label_path
@@ -50,7 +56,7 @@ class kittidata(Dataset):
             label = io.imread(os.path.join(self.label_path, self.val_label[idx]))
 
         h, w, c = label.shape
-        h = int(h // 32 * 32)  # the size must be dividable by 32
+        h = int(h // 32 * 32)
         w = int(w // 32 * 32)
         img = transform.resize(img, (h, w), mode='constant', preserve_range=True).astype('uint8')
         label = transform.resize(label, (h, w), mode='constant', preserve_range=True).astype('uint8')
@@ -58,11 +64,24 @@ class kittidata(Dataset):
         if self.transform:
             img = self.transform(img)
 
-        label_temp = np.zeros((h, w)).reshape(-1)
+        num_label = torch.zeros(h, w).view(-1).short()
         for i, v in enumerate(label.reshape(-1, c)):
             try:
-                label_temp[i] = self.class_color.index(tuple(v[:3]))
-            except:
-                label_temp[i] = 0
+                num_label[i] = self.class_color.index(tuple(v[:3]))
+            except:  # some pixel values not follow the defined labels above.
+                # print(tuple(v[:3])) # too much inaccuracy, some due to resize, the rest come from the image reader
+                num_label[i] = 0  # it is not good yet
+        num_label = num_label.view(h, w)
+        target = torch.zeros(self.class_n, h, w)
+        for c in range(self.class_n):
+            target[c, num_label == c] = 1
 
-        return img, label_temp.reshape(h, w)
+        return img, target, num_label
+
+    def visualize(self, label):
+        h, w = label.shape
+        temp_label = np.zeros((h, w, 3), dtype='uint8')
+        for i in range(h):  # how to write more elegantly
+            for j in range(w):
+                temp_label[i, j] = self.class_color[int(label[i, j])]
+        return temp_label
