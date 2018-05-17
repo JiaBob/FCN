@@ -4,13 +4,8 @@ import torch
 from skimage import io, transform
 import os
 
-from PIL import Image
-from skimage import io, transform
-import os
-
-
 class kittidata(Dataset):
-    def __init__(self, data_path, label_path, split_ratio, transform=None):
+    def __init__(self, data_path, label_path, split_ratio, shrink_rate=0.6, transform=None, flip_rate=0.5):
         self.class_name = ('sky', 'building', 'road', 'sidewalk', 'fence',
                            'vegetation', 'pole', 'car', 'sign', 'pedestrian'
                                                                 'cyclist', 'ignore')
@@ -22,8 +17,13 @@ class kittidata(Dataset):
         self.data_path = data_path
         self.label_path = label_path
         self.phase = 'train'
-        self.transform = transform
+        if self.phase == 'train':
+            self.shrink_rate = shrink_rate
+        else:
+            self.shrink_rate = 1  # wont resize for validation
 
+        self.flip_rate = flip_rate
+        self.transform = transform
         self.data = os.listdir(data_path)  # only store path rather than image, to save space
         self.label = os.listdir(label_path)
         self.split_ratio = split_ratio
@@ -56,10 +56,17 @@ class kittidata(Dataset):
             label = io.imread(os.path.join(self.label_path, self.val_label[idx]))
 
         h, w, c = label.shape
-        h = int(h // 32 * 32)
-        w = int(w // 32 * 32)
-        img = transform.resize(img, (h, w), mode='constant', preserve_range=True).astype('uint8')
-        label = transform.resize(label, (h, w), mode='constant', preserve_range=True).astype('uint8')
+        h = int(h // 32 * self.shrink_rate) * 32
+        w = int(w // 32 * self.shrink_rate) * 32
+
+        # use interpolation for quality
+        img = transform.resize(img, (h, w), order=1, mode='constant', preserve_range=True).astype('uint8')
+        # dont use interpolation to avoid illegel values
+        label = transform.resize(label, (h, w), order=0, mode='constant', preserve_range=True).astype('uint8')
+
+        if np.random.random() < self.flip_rate:
+            img = np.fliplr(img).copy()  # cause error if remove '.copy()' (prevent memory sharing)
+            label = np.fliplr(label).copy()
 
         if self.transform:
             img = self.transform(img)
@@ -68,9 +75,10 @@ class kittidata(Dataset):
         for i, v in enumerate(label.reshape(-1, c)):
             try:
                 num_label[i] = self.class_color.index(tuple(v[:3]))
-            except:  # some pixel values not follow the defined labels above.
-                # print(tuple(v[:3])) # too much inaccuracy, some due to resize, the rest come from the image reader
+            except:  # few pixel values not follow the defined labels above.
+                # print(tuple(v[:3]))
                 num_label[i] = 0  # it is not good yet
+
         num_label = num_label.view(h, w)
         target = torch.zeros(self.class_n, h, w)
         for c in range(self.class_n):
