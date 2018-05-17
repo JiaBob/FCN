@@ -17,8 +17,10 @@ writer = SummaryWriter('log')
 n_class = 12
 
 batch_size = 1
+multi_thread_loader = 2
 epochs = 500
-lr = 1e-4
+lr = 1e-3
+lr_pretrain = 1e-4
 momentum = 0
 w_decay = 1e-5
 step_size = 50
@@ -44,10 +46,10 @@ tf = transforms.Compose([transforms.ToTensor(), transforms.Normalize([0.5, 0.5, 
 dataset = kittidata(train_rgb_path, train_label_path, 0.8, transform=tf)
 
 
-train_loader = DataLoader(dataset.setphase('train'), batch_size=batch_size, shuffle=False)
-val_loader = DataLoader(dataset.setphase('val'), batch_size=1, shuffle=False)
+train_loader = DataLoader(dataset.setphase('train'), batch_size=batch_size, shuffle=False, num_workers=multi_thread_loader)
+val_loader = DataLoader(dataset.setphase('val'), batch_size=1, shuffle=False, num_workers=multi_thread_loader)
 
-device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 vgg_model = VGGNet(requires_grad=True, model='vgg11', remove_fc=True).to(device)
 fcn_model = FCN8s(pretrained_net=vgg_model, n_class=n_class).to(device)
@@ -55,7 +57,15 @@ fcn_model = FCN8s(pretrained_net=vgg_model, n_class=n_class).to(device)
 print('data loading finished')
 
 criterion = nn.BCEWithLogitsLoss()
-optimizer = optim.RMSprop(fcn_model.parameters(), lr=lr, momentum=momentum, weight_decay=w_decay)
+
+params = list()
+for name, param in fcn_model.named_parameters():
+    if 'pretrained_net' in name:  # use small learning rate for
+        params += [{'params':param, 'lr': lr_pretrain}]
+    else:
+        params += [{'params':param, 'lr': lr}]
+
+optimizer = optim.RMSprop(params, momentum=momentum, weight_decay=w_decay)
 scheduler = lr_scheduler.StepLR(optimizer, step_size=step_size,
                                 gamma=gamma)  # decay LR by a factor of 0.5 every 30 epochs
 
@@ -82,7 +92,7 @@ def train():
             optimizer.step()
 
             if iter % 10 == 0:
-                print("epoch{}, iter{}, time elapsed{} sec, loss: {}".format(epoch, iter, time.time()-ti, loss.item()))
+                print("epoch{}, iter{}, time elapsed {:.1f} sec, loss: {}".format(epoch, iter, time.time()-ti, loss.item()))
 
         print("Finish epoch {}, epoch time{}".format(epoch, time.time() - ts))
         torch.save(fcn_model, model_path)
@@ -91,11 +101,13 @@ def train():
 
 
 def val(epoch):
+    print('validation starts')
     fcn_model.eval()
     total_ious = []
     pixel_accs = []
     tol_time = 0
     with torch.no_grad():
+        tii = time.time()
         for iter, (inputs, labels, num_labels) in enumerate(val_loader):
             ti = time.time()
             inputs = inputs.to(device)
@@ -108,16 +120,20 @@ def val(epoch):
             writer.add_image('result %d'%(iter), inputs)
 
             target = num_labels.numpy()
+            t_iou = time.time()
             for p, t in zip(pred, target):
                 total_ious.append(iou(p, t))
                 pixel_accs.append(pixel_acc(p, t))
 
-            ti = time.time() - ti
-            tol_time += ti
             writer.add_scalar('time', ti, iter)
+            print('iou takes {}'.format(time.time() - t_iou))
             print(iou(p, t), pixel_acc(p, t))
-            print('Iteration {} takes {:.2f} sec'.format(iter, ti))
-    print('total valuation time is {:.2f}'.format(tol_time))
+            ti = time.time() - ti
+            print(time.time(), tii)
+            tiis = time.time() - tii
+            tol_time += ti
+            print('Iteration {} takes {:.8f}/{:.8f} sec'.format(iter, ti, tiis))
+    print('total validation time is {:.2f}'.format(tol_time))
     # Calculate average IoU
     total_ious = np.array(total_ious).T  # n_class * val_len
     ious = np.nanmean(total_ious, axis=1)
@@ -153,5 +169,5 @@ def pixel_acc(pred, target):
 
 
 if __name__ == "__main__":
-    val(0)  # show the accuracy before training
-    #train()
+    #val(0)  # show the accuracy before training
+    train()
