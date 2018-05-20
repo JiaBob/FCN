@@ -218,7 +218,7 @@ if __name__ == "__main__":
     batch_size, n_class, h, w = 10, 12, 192, 192
 
     # test output size
-    vgg_model = VGGNet(requires_grad=True)
+    vgg_model = VGGNet(model='vgg11', requires_grad=True)
     # input = torch.autograd.Variable(torch.randn(batch_size, 3, 224, 224))
     # output = vgg_model(input)
     # assert output['x5'].size() == torch.Size([batch_size, 512, 7, 7])
@@ -251,7 +251,7 @@ if __name__ == "__main__":
     fcn_model = FCNs(pretrained_net=vgg_model, n_class=n_class)
     criterion = nn.BCELoss()
     optimizer = optim.SGD(fcn_model.parameters(), lr=1e-3, momentum=0.9)
-    input = torch.autograd.Variable(torch.randn(batch_size, 3, h, w))
+    input = torch.randn(batch_size, 3, h, w)
     y = torch.autograd.Variable(torch.randn(batch_size, n_class, h, w), requires_grad=False)
     for iter in range(10):
         optimizer.zero_grad()

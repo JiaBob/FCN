@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="WebServers">
+    <option name="servers">
+      <webServer id="bcd0367c-abdf-4e3f-a4cd-04bbd9db4fee" name="DL-server" url="http://18.188.232.199">
+        <fileTransfer host="18.188.232.199" port="22" privateKey="C:\Users\BOB\Desktop\spot-gpu.pem" accessType="SFTP" keyPair="true">
+          <advancedOptions>
+            <advancedOptions dataProtectionLevel="Private" />
+          </advancedOptions>
+          <option name="port" value="22" />
+        </fileTransfer>
+      </webServer>
+    </option>
+  </component>
+</project>

@@ -1,11 +1,12 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 from torch.optim import lr_scheduler
 from torch.utils.data import DataLoader
-from torchvision import transforms
+from torchvision import transforms, utils
 from fcn import VGGNet, FCN32s, FCN16s, FCN8s, FCNs
-from loaddata import kittidata
+from loaddata import kittidata, kittidata_split
 
 import numpy as np
 import time
@@ -16,14 +17,14 @@ writer = SummaryWriter('log')
 
 n_class = 12
 
-batch_size = 1
-multi_thread_loader = 2
+batch_size = 8
+multi_thread_loader = 0
 epochs = 500
 lr = 1e-3
 lr_pretrain = 1e-4
 momentum = 0
 w_decay = 1e-5
-step_size = 50
+step_size = 10
 gamma = 0.5
 configs = "FCNs-BCEWithLogits_batch{}_epoch{}_RMSprop_scheduler-step{}-gamma{}_lr{}_momentum{}_w_decay{}".format(batch_size, epochs, step_size, gamma, lr, momentum, w_decay)
 print("Configs:", configs)
@@ -42,60 +43,66 @@ test_rgb_path = './kitti_semseg_unizg/test/rgb'
 test_depth_path = './kitti_semseg_unizg/test/depth'
 test_label_path = './kitti_semseg_unizg/test/labels'
 
-tf = transforms.Compose([transforms.ToTensor(), transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])])
-dataset = kittidata(train_rgb_path, train_label_path, 0.8, transform=tf)
+kittiset = kittidata_split(train_rgb_path, train_label_path, 0.7)
 
+train_data, train_label = kittiset.getdata('train')
+val_data, val_label = kittiset.getdata('val')
 
-train_loader = DataLoader(dataset.setphase('train'), batch_size=batch_size, shuffle=False, num_workers=multi_thread_loader)
-val_loader = DataLoader(dataset.setphase('val'), batch_size=1, shuffle=False, num_workers=multi_thread_loader)
+train_set = kittidata(train_data, train_label, shrink_rate=0.6, flip_rate=0.5)
+val_set = kittidata(val_data, val_label, shrink_rate=1, flip_rate=0)  # keep data unchanged
+print('{} for training, {} for validation'.format(len(train_data), len(val_data)))
+
+# set the validation batch_size equal to the device amount to fully utilize the (multi)GPU
+device_amount = torch.cuda.device_count() if torch.cuda.device_count() > 0 else 1
+print('there are {} devices'.format(device_amount))
+train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=False, num_workers=multi_thread_loader)
+val_loader = DataLoader(val_set, batch_size=device_amount, shuffle=False, num_workers=multi_thread_loader)
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 vgg_model = VGGNet(requires_grad=True, model='vgg11', remove_fc=True).to(device)
-fcn_model = FCN8s(pretrained_net=vgg_model, n_class=n_class).to(device)
+fcn_model = nn.DataParallel(FCN8s(pretrained_net=vgg_model, n_class=n_class)).to(device)
 
 print('data loading finished')
 
-criterion = nn.BCEWithLogitsLoss()
+criterion = nn.NLLLoss()
 
 params = list()
 for name, param in fcn_model.named_parameters():
     if 'pretrained_net' in name:  # use small learning rate for
-        params += [{'params':param, 'lr': lr_pretrain}]
+        params += [{'params': param, 'lr': lr_pretrain}]
     else:
-        params += [{'params':param, 'lr': lr}]
+        params += [{'params': param, 'lr': lr}]
 
-optimizer = optim.RMSprop(params, momentum=momentum, weight_decay=w_decay)
-scheduler = lr_scheduler.StepLR(optimizer, step_size=step_size,
+optimizer = optim.Adam(params, weight_decay=w_decay)
+optimizer = nn.DataParallel(optimizer)
+scheduler = lr_scheduler.StepLR(optimizer.module, step_size=step_size,
                                 gamma=gamma)  # decay LR by a factor of 0.5 every 30 epochs
 
-# create dir for score
-score_dir = os.path.join("scores", configs)
-if not os.path.exists(score_dir):
-    os.makedirs(score_dir)
-IU_scores = np.zeros((epochs, n_class))
-pixel_scores = np.zeros(epochs)
-
-
+total_train_set = len(train_data)
+total_iter = len(train_loader)
 def train():
     ti = time.time()
     for epoch in range(epochs):
         scheduler.step()
-
+        epoch_loss = 0
         ts = time.time()
-        for iter, (inputs, labels, _) in enumerate(train_loader):
+        for iter, (inputs, _, labels) in enumerate(train_loader):
             optimizer.zero_grad()
             inputs, labels = inputs.to(device), labels.to(device)
             outputs = fcn_model(inputs)
-            loss = criterion(outputs, labels)
+            loss = criterion(F.log_softmax(outputs, dim=1), labels).to(device)
+            epoch_loss += loss.item()
             loss.backward()
-            optimizer.step()
+            optimizer.module.step()
 
+            writer.add_scalar('single_iter_loss', loss.item(), epoch * total_iter + iter)
             if iter % 10 == 0:
-                print("epoch{}, iter{}, time elapsed {:.1f} sec, loss: {}".format(epoch, iter, time.time()-ti, loss.item()))
-
-        print("Finish epoch {}, epoch time{}".format(epoch, time.time() - ts))
-        torch.save(fcn_model, model_path)
+                print("epoch{}, iter{}, time elapsed {:.1f} sec".format(epoch, iter, time.time()-ti))
+        mel = epoch_loss / total_train_set
+        writer.add_scalar('mean_epoch_loss', mel, epoch)
+        print("Epoch {} takes {} with mean loss {:.5f}".format(epoch, time.time() - ts, mel))
+        torch.save(fcn_model, model_path + '_epoch{}'.format(epoch))  # store the model each epoch
 
         val(epoch)
 
@@ -107,7 +114,6 @@ def val(epoch):
     pixel_accs = []
     tol_time = 0
     with torch.no_grad():
-        tii = time.time()
         for iter, (inputs, labels, num_labels) in enumerate(val_loader):
             ti = time.time()
             inputs = inputs.to(device)
@@ -117,32 +123,26 @@ def val(epoch):
             N, _, h, w = output.shape
             pred = output.transpose(0, 2, 3, 1).reshape(-1, n_class).argmax(axis=1).reshape(N, h, w)
 
-            writer.add_image('result %d'%(iter), inputs)
+            if iter == 0:
+                writer.add_image('result of {}'.format(iter), image_grid(inputs, pred, num_labels), epoch)
 
             target = num_labels.numpy()
-            t_iou = time.time()
             for p, t in zip(pred, target):
                 total_ious.append(iou(p, t))
                 pixel_accs.append(pixel_acc(p, t))
 
-            writer.add_scalar('time', ti, iter)
-            print('iou takes {}'.format(time.time() - t_iou))
-            print(iou(p, t), pixel_acc(p, t))
             ti = time.time() - ti
-            print(time.time(), tii)
-            tiis = time.time() - tii
             tol_time += ti
-            print('Iteration {} takes {:.8f}/{:.8f} sec'.format(iter, ti, tiis))
-    print('total validation time is {:.2f}'.format(tol_time))
+            break
     # Calculate average IoU
     total_ious = np.array(total_ious).T  # n_class * val_len
     ious = np.nanmean(total_ious, axis=1)
     pixel_accs = np.array(pixel_accs).mean()
+    writer.add_scalar('pixel_acc', pixel_accs, epoch)
+    writer.add_scalar('meanIoU', np.nanmean(ious), epoch)
+
     print("epoch{}, pix_acc: {}, meanIoU: {}, IoUs: {}".format(epoch, pixel_accs, np.nanmean(ious), ious))
-    IU_scores[epoch] = ious
-    np.save(os.path.join(score_dir, "meanIU"), IU_scores)
-    pixel_scores[epoch] = pixel_accs
-    np.save(os.path.join(score_dir, "meanPixel"), pixel_scores)
+    print('total validation time is {:.2f}'.format(tol_time))
 
 
 # borrow functions and modify it from https://github.com/Kaixhin/FCN-semantic-segmentation/blob/master/main.py
@@ -168,6 +168,13 @@ def pixel_acc(pred, target):
     return correct / total
 
 
+# align images (batch, orginial, pred, ground_truth)
+def image_grid(image, pred, label):
+    l = list()
+    for i in range(image.shape[0]):
+        l.extend([train_set.denormalize(image[i]), train_set.visualize(pred[i]), train_set.visualize(label[i])])
+    return utils.make_grid(l, nrow=3)
+
 if __name__ == "__main__":
-    #val(0)  # show the accuracy before training
-    train()
+    val(0)  # show the accuracy before training
+    #train()
